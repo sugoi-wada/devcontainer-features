@@ -1,0 +1,21 @@
+{
+    "name": "Google Cloud SDK",
+    "id": "google-cloud-sdk",
+    "version": "1.0.0",
+    "description": "Install Google Cloud SDK",
+    "options": {
+        "version": {
+            "type": "string",
+            "default": "latest",
+            "description": "Select a version of Google Cloud SDK"
+        },
+        "components": {
+            "type": "string",
+            "default": "",
+            "description": "Select components to install"
+        }
+    },
+    "installsAfter": [
+        "ghcr.io/devcontainers/features/common-utils"
+    ]
+}

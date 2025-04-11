@@ -1,0 +1,20 @@
+{
+    "google-cloud-sdk": {
+        "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+        "features": {
+            "google-cloud-sdk": {
+                "version": "latest",
+                "components": ""
+            }
+        }
+    },
+    "google-cloud-sdk-with-version": {
+        "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+        "features": {
+            "google-cloud-sdk": {
+                "version": "410.0.0",
+                "components": ""
+            }
+        }
+    }
+}
