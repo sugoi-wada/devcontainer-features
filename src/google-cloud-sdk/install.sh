@@ -19,6 +19,8 @@ INSTALL_COMPONENTS="${COMPONENTS:-""}"
 APT_PACKAGE_NAME="google-cloud-cli"
 APT_SOURCE_LIST="/etc/apt/sources.list.d/google-cloud-sdk.list"
 APT_KEYRING="/usr/share/keyrings/cloud.google.gpg"
+# この実行で鍵を新規作成したかどうか（フォールバック時に削除して良いかの判定に使う）
+APT_KEYRING_CREATED=0
 INSTALL_DIR="/usr/local/google-cloud-sdk"
 USERNAME="${USERNAME:-"${_REMOTE_USER:-"automatic"}"}"
 
@@ -63,7 +65,16 @@ check_packages() {
 # アーカイブ版へフォールバックする際にaptリポジトリ設定を撤去する
 # （アーカイブ版とaptパッケージが二重にインストールされうる状態を残さないため）
 remove_apt_repo() {
-    rm -f "${APT_SOURCE_LIST}" "${APT_KEYRING}"
+    rm -f "${APT_SOURCE_LIST}"
+    # /usr/share/keyrings/cloud.google.gpg は gcsfuse や artifact-registry など
+    # 他の packages.cloud.google.com リポジトリでも共有される公式のパスなので、
+    # この実行で新規作成した場合のみ削除する。
+    # （既存の鍵を消すと、それを signed-by で参照している他リポジトリの
+    #   apt-get update が "is not signed" で失敗してしまう）
+    if [ "${APT_KEYRING_CREATED}" = "1" ]; then
+        rm -f "${APT_KEYRING}"
+        APT_KEYRING_CREATED=0
+    fi
     apt-get update -y > /dev/null 2>&1 || true
 }
 
@@ -164,6 +175,9 @@ install_via_apt() {
         return 1
     fi
     rm -f "${tmp_key}"
+    if [ ! -e "${APT_KEYRING}" ]; then
+        APT_KEYRING_CREATED=1
+    fi
     mv "${APT_KEYRING}.tmp" "${APT_KEYRING}"
     chmod 644 "${APT_KEYRING}"
 
@@ -186,7 +200,8 @@ install_via_apt() {
             *-*) ;;
             *) apt_version="${apt_version}-0" ;;
         esac
-        if ! apt-cache madison "${APT_PACKAGE_NAME}" | grep -q " ${apt_version} "; then
+        # バージョン文字列にドットを含むため、正規表現ではなく固定文字列で照合する
+        if ! apt-cache madison "${APT_PACKAGE_NAME}" | grep -qF " ${apt_version} "; then
             echo "aptリポジトリにバージョン ${CLOUD_SDK_VERSION} が見つかりませんでした。アーカイブ版にフォールバックします。"
             remove_apt_repo
             return 1
@@ -215,9 +230,12 @@ install_via_apt() {
         fi
         # バージョン指定時はコンポーネント側も同じバージョンに揃える
         # （google-cloud-cli-* の依存はバージョン非固定のため、揃えないとcoreだけ固定版になる）
-        if [ -n "${apt_version}" ] && [ "${resolved}" != "${component}" ] \
-            && apt-cache madison "${resolved}" | grep -q " ${apt_version} "; then
-            resolved="${resolved}=${apt_version}"
+        if [ -n "${apt_version}" ] && [ "${resolved}" != "${component}" ]; then
+            if apt-cache madison "${resolved}" | grep -qF " ${apt_version} "; then
+                resolved="${resolved}=${apt_version}"
+            else
+                echo "コンポーネント '${component}' にバージョン ${CLOUD_SDK_VERSION} のパッケージが見つかりませんでした。バージョン指定なしで解決します。"
+            fi
         fi
         component_packages="${component_packages} ${resolved}"
     done
@@ -229,11 +247,21 @@ install_via_apt() {
     echo "aptで依存関係を解決できるか確認しています..."
     local dry_run_log
     dry_run_log="$(mktemp)"
+    # メッセージを固定するためロケールをCにする
     # shellcheck disable=SC2086
-    if ! apt-get -y install --no-install-recommends -s "${apt_target}" ${component_packages} \
+    if ! LC_ALL=C apt-get -y install --no-install-recommends -s "${apt_target}" ${component_packages} \
         > "${dry_run_log}" 2>&1; then
         echo "aptで依存関係を解決できませんでした。アーカイブ版にフォールバックします。"
         tail -n 5 "${dry_run_log}"
+        rm -f "${dry_run_log}"
+        remove_apt_repo
+        return 1
+    fi
+    # 解決はできても既存パッケージの削除やダウングレードを伴う場合がある。
+    # -y で本実行すると環境を壊してしまうため、これもフォールバック対象にする。
+    if grep -qE "^The following packages will be (REMOVED|DOWNGRADED)" "${dry_run_log}"; then
+        echo "aptでのインストールが既存パッケージの削除・ダウングレードを伴うため、アーカイブ版にフォールバックします。"
+        grep -A2 -E "^The following packages will be (REMOVED|DOWNGRADED)" "${dry_run_log}"
         rm -f "${dry_run_log}"
         remove_apt_repo
         return 1
