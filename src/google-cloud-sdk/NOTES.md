@@ -1,23 +1,3 @@
-
-# Google Cloud CLI (google-cloud-sdk)
-
-Google Cloud CLI (gcloud / gsutil / bq) をインストールします。Debian・Ubuntu では apt リポジトリ、それ以外の環境や apt に存在しないバージョン指定時は公式アーカイブを使用します。
-
-## Example Usage
-
-```json
-"features": {
-    "ghcr.io/sugoi-wada/devcontainer-features/google-cloud-sdk:1": {}
-}
-```
-
-## Options
-
-| Options Id | Description | Type | Default Value |
-|-----|-----|-----|-----|
-| version | インストールする Google Cloud CLI のバージョン（例: latest, 583.0.0） | string | latest |
-| components | 追加インストールするコンポーネント名をカンマまたは空白区切りで指定（例: gke-gcloud-auth-plugin,kubectl）。apt 経路では google-cloud-cli- プレフィックスが自動で付与されます。 | string | - |
-
 ## インストール方式
 
 | 環境 / 指定 | インストール方式 |
@@ -48,8 +28,3 @@ apt リポジトリには直近 40〜50 バージョン程度しか残らない�
 
 - apt 経路でインストールした場合、`gcloud components install` は無効化されています（apt でコンポーネントを追加してください）。
 - パッケージ名は `google-cloud-sdk` から `google-cloud-cli` に変更されています。Feature の ID は互換性のため `google-cloud-sdk` のままです。
-
-
----
-
-_Note: This file was auto-generated from the [devcontainer-feature.json](https://github.com/sugoi-wada/devcontainer-features/blob/main/src/google-cloud-sdk/devcontainer-feature.json).  Add additional notes to a `NOTES.md`._

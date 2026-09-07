@@ -1,19 +1,33 @@
 {
-    "name": "Google Cloud SDK",
+    "name": "Google Cloud CLI",
     "id": "google-cloud-sdk",
-    "version": "1.0.0",
-    "description": "Install Google Cloud SDK",
+    "version": "1.1.0",
+    "description": "Google Cloud CLI (gcloud / gsutil / bq) をインストールします。Debian・Ubuntu では apt リポジトリ、それ以外の環境や apt に存在しないバージョン指定時は公式アーカイブを使用します。",
+    "documentationURL": "https://github.com/sugoi-wada/devcontainer-features/tree/main/src/google-cloud-sdk",
     "options": {
         "version": {
             "type": "string",
+            "proposals": [
+                "latest"
+            ],
             "default": "latest",
-            "description": "Select a version of Google Cloud SDK"
+            "description": "インストールする Google Cloud CLI のバージョン（例: latest, 583.0.0）"
         },
         "components": {
             "type": "string",
+            "proposals": [
+                "",
+                "gke-gcloud-auth-plugin",
+                "kubectl",
+                "beta",
+                "gke-gcloud-auth-plugin,kubectl"
+            ],
             "default": "",
-            "description": "Select components to install"
+            "description": "追加インストールするコンポーネント名をカンマまたは空白区切りで指定（例: gke-gcloud-auth-plugin,kubectl）。apt 経路では google-cloud-cli- プレフィックスが自動で付与されます。"
         }
+    },
+    "containerEnv": {
+        "PATH": "/usr/local/google-cloud-sdk/bin:${PATH}"
     },
     "installsAfter": [
         "ghcr.io/devcontainers/features/common-utils"
