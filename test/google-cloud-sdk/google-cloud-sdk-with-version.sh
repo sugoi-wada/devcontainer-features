@@ -4,6 +4,6 @@ set -e
 
 source dev-container-features-test-lib
 
-check "install google-cloud-sdk" gcloud --version | grep "Google Cloud SDK 410.0.0"
+check "指定したバージョンがインストールされている" bash -c "gcloud --version | grep -E 'Google Cloud SDK 520\.0\.0'"
 
 reportResults

@@ -5,193 +5,290 @@
 #-------------------------------------------------------------------------------------------------------------
 #
 # Docs: https://cloud.google.com/sdk/docs/install
-# Maintainer: Google Cloud SDK Team
-
-CLOUD_SDK_VERSION=${VERSION:-"latest"}
-INSTALL_COMPONENTS=${COMPONENTS:-""}
+#
+# Debian / Ubuntu では packages.cloud.google.com の apt リポジトリを使います。
+# 配布パッケージ名は google-cloud-sdk から google-cloud-cli に変更されているため後者を使用します。
+# apt が使えない環境、または apt リポジトリに存在しないバージョンが指定された場合は
+# 公式のバージョン付きアーカイブ（tar.gz）にフォールバックします。
 
 set -e
 
-# Clean up
-rm -rf /var/lib/apt/lists/*
+CLOUD_SDK_VERSION="${VERSION:-"latest"}"
+INSTALL_COMPONENTS="${COMPONENTS:-""}"
+
+APT_PACKAGE_NAME="google-cloud-cli"
+INSTALL_DIR="/usr/local/google-cloud-sdk"
+USERNAME="${USERNAME:-"${_REMOTE_USER:-"automatic"}"}"
 
 if [ "$(id -u)" -ne 0 ]; then
     echo -e 'スクリプトはroot権限で実行する必要があります。sudo、su、またはDockerfileに "USER root" を追加してからこのスクリプトを実行してください。'
     exit 1
 fi
 
-apt_get_update()
-{
-    if [ "$(find /var/lib/apt/lists/* | wc -l)" = "0" ]; then
-        echo "apt-get updateを実行しています..."
-        apt-get update -y
+# インストール先を所有させるユーザーを決定する（アーカイブ版で gcloud components install を使えるようにするため）
+if [ "${USERNAME}" = "auto" ] || [ "${USERNAME}" = "automatic" ]; then
+    USERNAME=""
+    for CURRENT_USER in vscode node codespace "$(awk -v val=1000 -F ":" '$3==val{print $1}' /etc/passwd)"; do
+        if id -u "${CURRENT_USER}" > /dev/null 2>&1; then
+            USERNAME="${CURRENT_USER}"
+            break
+        fi
+    done
+    if [ -z "${USERNAME}" ]; then
+        USERNAME=root
     fi
+elif [ "${USERNAME}" = "none" ] || ! id -u "${USERNAME}" > /dev/null 2>&1; then
+    USERNAME=root
+fi
+
+export DEBIAN_FRONTEND=noninteractive
+
+apt_get_update() {
+    echo "apt-get updateを実行しています..."
+    apt-get update -y
 }
 
-# Checks if packages are installed and installs them if not
+# パッケージが未インストールの場合のみインストールする
 check_packages() {
     if ! dpkg -s "$@" > /dev/null 2>&1; then
-        apt_get_update
+        if [ "$(find /var/lib/apt/lists/* 2> /dev/null | wc -l)" = "0" ]; then
+            apt_get_update
+        fi
         apt-get -y install --no-install-recommends "$@"
     fi
 }
 
-export DEBIAN_FRONTEND=noninteractive
+# aptリポジトリに該当パッケージが存在するか判定する
+apt_package_exists() {
+    apt-cache policy "$1" 2> /dev/null | grep -qE "^\s+Candidate: [^(]" 
+}
 
-# 必要なパッケージのインストール
-check_packages curl ca-certificates apt-transport-https lsb-release gnupg2 python3
+# アーキテクチャの判定（Google Cloud CLI のアーカイブ名に合わせる）
+detect_archive_arch() {
+    local arch
+    arch="$(uname -m)"
+    case "${arch}" in
+        x86_64 | amd64)
+            echo "x86_64"
+            ;;
+        arm64 | aarch64)
+            echo "arm"
+            ;;
+        *)
+            echo "サポートされていないアーキテクチャです: ${arch}" >&2
+            return 1
+            ;;
+    esac
+}
 
-# OSとアーキテクチャの検出
-OS=$(uname -s | tr '[:upper:]' '[:lower:]')
-ARCH=$(uname -m)
+# 追加コンポーネント指定をカンマ・空白区切りのどちらでも受け付けて正規化する
+normalize_components() {
+    echo "${INSTALL_COMPONENTS}" | tr ',' ' ' | tr -s ' '
+}
 
-# アーキテクチャの変換
-case "${ARCH}" in
-  x86_64)
-    SDK_ARCH="x86_64"
-    ;;
-  arm64|aarch64)
-    SDK_ARCH="arm64"
-    ;;
-  *)
-    echo "サポートされていないアーキテクチャです: ${ARCH}"
-    exit 1
-    ;;
-esac
+setup_shell_integration() {
+    echo "PATHとシェル補完を設定しています..."
+    cat > /etc/profile.d/google-cloud-sdk.sh << EOF
+if [ -f "${INSTALL_DIR}/path.bash.inc" ]; then
+    . "${INSTALL_DIR}/path.bash.inc"
+fi
+if [ -n "\${BASH_VERSION}" ] && [ -f "${INSTALL_DIR}/completion.bash.inc" ]; then
+    . "${INSTALL_DIR}/completion.bash.inc"
+fi
+EOF
+    chmod 755 /etc/profile.d/google-cloud-sdk.sh
 
-# OSの判定
-case "${OS}" in
-  linux)
-    PLATFORM="linux"
-    
-    # Linuxディストリビューションに応じたインストール
-    if [ -f /etc/debian_version ] || [ -f /etc/lsb-release ]; then
-        # Debian/Ubuntu系の場合
-        echo "Debian/Ubuntu系システムを検出しました。"
-        
-        # 必要なパッケージの確認
-        check_packages curl apt-transport-https ca-certificates gnupg
-        
-        # Google Cloud SDKのリポジトリを追加
-        echo "Google Cloud SDKリポジトリを追加しています..."
-        
-        # 古いリポジトリ設定があれば削除
-        if [ -f /etc/apt/sources.list.d/google-cloud-sdk.list ]; then
-            rm -f /etc/apt/sources.list.d/google-cloud-sdk.list
+    if type zsh > /dev/null 2>&1 || [ -d /etc/zsh ]; then
+        mkdir -p /etc/zsh
+        if ! grep -q "${INSTALL_DIR}/path.zsh.inc" /etc/zsh/zshrc 2> /dev/null; then
+            cat >> /etc/zsh/zshrc << EOF
+
+if [ -f "${INSTALL_DIR}/path.zsh.inc" ]; then
+    . "${INSTALL_DIR}/path.zsh.inc"
+fi
+if [ -f "${INSTALL_DIR}/completion.zsh.inc" ]; then
+    . "${INSTALL_DIR}/completion.zsh.inc"
+fi
+EOF
         fi
-        
-        # GPGキーのディレクトリ作成
-        mkdir -p /usr/share/keyrings
-        
-        # GCPパブリックキーのインポート（より堅牢な方法）
-        echo "Google Cloud SDK GPGキーをインポートしています..."
-        curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg
-        
-        # リポジトリの追加
-        echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | tee /etc/apt/sources.list.d/google-cloud-sdk.list
-        
-        # パッケージリストの更新（明示的に実行）
-        echo "パッケージリストを更新しています..."
-        apt-get update -y
-        
-        # パッケージのインストール
-        echo "Google Cloud SDKをインストールしています..."
-        apt-get -y install google-cloud-sdk
-        
-        # 追加コンポーネントのインストール（指定されている場合）
-        if [ ! -z "${INSTALL_COMPONENTS}" ]; then
-            echo "追加コンポーネントをインストールしています: ${INSTALL_COMPONENTS}"
-            apt-get -y install ${INSTALL_COMPONENTS}
-        fi
-    else
-        # その他のLinuxディストリビューションの場合は直接ダウンロード
-        INSTALL_METHOD="download"
     fi
-    ;;
-  darwin)
-    PLATFORM="darwin"
-    INSTALL_METHOD="download"
-    ;;
-  *)
-    echo "サポートされていないOSです: ${OS}"
-    exit 1
-    ;;
-esac
 
-# パッケージマネージャでインストールできない場合は直接ダウンロード
-if [ "${INSTALL_METHOD}" = "download" ] || [ $? -ne 0 ]; then
-    echo "Google Cloud SDKを直接ダウンロードしてインストールします..."
-    
-    # インストール先ディレクトリ
-    INSTALL_DIR="/usr/local/google-cloud-sdk"
-    
-    # 既存のインストールを確認
+    # 非ログインシェルからも使えるようにシンボリックリンクを作成
+    for cmd in gcloud gsutil bq docker-credential-gcloud gcloud-crc32c git-credential-gcloud.sh; do
+        if [ -x "${INSTALL_DIR}/bin/${cmd}" ]; then
+            ln -sf "${INSTALL_DIR}/bin/${cmd}" "/usr/local/bin/${cmd}"
+        fi
+    done
+}
+
+# ------------------------------------------------------------------
+# apt リポジトリ経由でのインストール（Debian / Ubuntu）
+# ------------------------------------------------------------------
+install_via_apt() {
+    echo "aptリポジトリからGoogle Cloud CLIをインストールします。"
+
+    check_packages ca-certificates curl gnupg apt-transport-https
+
+    # 古いリポジトリ設定があれば削除
+    rm -f /etc/apt/sources.list.d/google-cloud-sdk.list
+
+    mkdir -p /usr/share/keyrings
+    echo "Google Cloud CLIの署名鍵をインポートしています..."
+    curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg \
+        | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg
+    chmod 644 /usr/share/keyrings/cloud.google.gpg
+
+    echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" \
+        > /etc/apt/sources.list.d/google-cloud-sdk.list
+
+    apt_get_update
+
+    # --- 先にインストール対象をすべて解決する（途中で失敗してアーカイブ版と二重インストールになるのを避ける） ---
+    local apt_target="${APT_PACKAGE_NAME}"
+    if [ "${CLOUD_SDK_VERSION}" != "latest" ]; then
+        # apt上のバージョン表記は <version>-0 形式
+        local apt_version="${CLOUD_SDK_VERSION}"
+        case "${apt_version}" in
+            *-*) ;;
+            *) apt_version="${apt_version}-0" ;;
+        esac
+        if ! apt-cache madison "${APT_PACKAGE_NAME}" | grep -q " ${apt_version} "; then
+            echo "aptリポジトリにバージョン ${CLOUD_SDK_VERSION} が見つかりませんでした。アーカイブ版にフォールバックします。"
+            return 1
+        fi
+        apt_target="${APT_PACKAGE_NAME}=${apt_version}"
+    fi
+
+    # 追加コンポーネントは apt 上のパッケージ名に解決する
+    # 多くは google-cloud-cli-<component>、kubectl などはコンポーネント名そのままのパッケージ名
+    local component_packages=""
+    local components
+    components="$(normalize_components)"
+    for component in ${components}; do
+        local resolved=""
+        local candidate
+        for candidate in "${APT_PACKAGE_NAME}-${component}" "${component}"; do
+            if apt_package_exists "${candidate}"; then
+                resolved="${candidate}"
+                break
+            fi
+        done
+        if [ -z "${resolved}" ]; then
+            echo "コンポーネント '${component}' に対応するaptパッケージが見つかりませんでした。アーカイブ版にフォールバックします。"
+            return 1
+        fi
+        component_packages="${component_packages} ${resolved}"
+    done
+
+    # ここまでで対象は解決済み。以降の失敗はフォールバックせずエラーにする
+    # （apt が途中で失敗した状態でアーカイブ版を重ねると壊れたインストールになるため）
+    echo "Google Cloud CLIをインストールしています: ${apt_target}${component_packages}"
+    # shellcheck disable=SC2086
+    if ! apt-get -y install --no-install-recommends "${apt_target}" ${component_packages}; then
+        echo "aptによるインストールに失敗しました。上記のエラーを確認してください。"
+        exit 1
+    fi
+}
+
+# ------------------------------------------------------------------
+# 公式アーカイブ経由でのインストール（apt以外の環境 / apt未収録バージョン）
+# ------------------------------------------------------------------
+install_via_archive() {
+    echo "公式アーカイブからGoogle Cloud CLIをインストールします。"
+
+    local sdk_arch
+    sdk_arch="$(detect_archive_arch)"
+
+    if type apt-get > /dev/null 2>&1; then
+        check_packages ca-certificates curl tar gzip python3
+    elif type apk > /dev/null 2>&1; then
+        apk add --no-cache ca-certificates curl tar gzip python3
+    elif type dnf > /dev/null 2>&1; then
+        dnf install -y ca-certificates curl tar gzip python3
+    elif type yum > /dev/null 2>&1; then
+        yum install -y ca-certificates curl tar gzip python3
+    fi
+
+    local required
+    for required in curl tar python3; do
+        if ! type "${required}" > /dev/null 2>&1; then
+            echo "必須コマンドが見つかりません: ${required}"
+            exit 1
+        fi
+    done
+
+    # latest: google-cloud-cli-linux-<arch>.tar.gz / 固定版: google-cloud-cli-<version>-linux-<arch>.tar.gz
+    local version_path=""
+    if [ "${CLOUD_SDK_VERSION}" != "latest" ]; then
+        version_path="-${CLOUD_SDK_VERSION}"
+    fi
+    local download_url="https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli${version_path}-linux-${sdk_arch}.tar.gz"
+
     if [ -d "${INSTALL_DIR}" ]; then
-        echo "Google Cloud SDKはすでに${INSTALL_DIR}にインストールされています。"
-        echo "既存のインストールを削除します..."
+        echo "既存のインストール (${INSTALL_DIR}) を削除します..."
         rm -rf "${INSTALL_DIR}"
     fi
-    
-    # 一時ディレクトリの作成
-    TMP_DIR=$(mktemp -d)
-    cd "${TMP_DIR}"
-    
-    # バージョン指定（latestでない場合）
-    VERSION_PATH=""
+
+    local tmp_dir
+    tmp_dir="$(mktemp -d)"
+
+    echo "Google Cloud CLIをダウンロードしています..."
+    echo "URL: ${download_url}"
+    if ! curl -fsSL "${download_url}" -o "${tmp_dir}/google-cloud-cli.tar.gz"; then
+        echo "ダウンロードに失敗しました。指定したバージョン (${CLOUD_SDK_VERSION}) が存在するか確認してください。"
+        echo "利用可能なバージョン: https://cloud.google.com/sdk/docs/downloads-versioned-archives"
+        rm -rf "${tmp_dir}"
+        exit 1
+    fi
+
+    echo "アーカイブを展開しています..."
+    tar -xzf "${tmp_dir}/google-cloud-cli.tar.gz" -C "$(dirname "${INSTALL_DIR}")"
+    rm -rf "${tmp_dir}"
+
+    echo "Google Cloud CLIをセットアップしています..."
+    CLOUDSDK_PYTHON="$(command -v python3)" \
+        "${INSTALL_DIR}/install.sh" \
+        --quiet \
+        --usage-reporting=false \
+        --path-update=false \
+        --command-completion=false \
+        --bash-completion=false
+
+    local components
+    components="$(normalize_components)"
+    if [ -n "${components}" ]; then
+        echo "追加コンポーネントをインストールしています: ${components}"
+        # shellcheck disable=SC2086
+        CLOUDSDK_PYTHON="$(command -v python3)" CLOUDSDK_CORE_DISABLE_PROMPTS=1 \
+            "${INSTALL_DIR}/bin/gcloud" components install ${components} --quiet
+    fi
+
     if [ "${CLOUD_SDK_VERSION}" != "latest" ]; then
-        VERSION_PATH="-${CLOUD_SDK_VERSION}"
+        CLOUDSDK_PYTHON="$(command -v python3)" \
+            "${INSTALL_DIR}/bin/gcloud" config set --installation component_manager/disable_update_check true
     fi
-    
-    # パッケージURLの構築
-    # ARM64の場合、Google Cloud SDKのダウンロードURLは特殊
-    if [ "${SDK_ARCH}" = "arm64" ]; then
-        if [ "${PLATFORM}" = "linux" ]; then
-            # Linux ARM64の場合
-            DOWNLOAD_URL="https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli${VERSION_PATH}-linux-arm.tar.gz"
-        else
-            # macOS ARM64の場合
-            DOWNLOAD_URL="https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli${VERSION_PATH}-darwin-arm.tar.gz"
-        fi
-    else
-        # x86_64の場合
-        DOWNLOAD_URL="https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli${VERSION_PATH}-${PLATFORM}-${SDK_ARCH}.tar.gz"
+
+    setup_shell_integration
+
+    if [ "${USERNAME}" != "root" ]; then
+        echo "${INSTALL_DIR} の所有者を ${USERNAME} に変更しています..."
+        chown -R "${USERNAME}:$(id -gn "${USERNAME}")" "${INSTALL_DIR}"
     fi
-    
-    echo "Google Cloud SDKをダウンロードしています..."
-    echo "URL: ${DOWNLOAD_URL}"
-    
-    # パッケージのダウンロード
-    curl -fsSL "${DOWNLOAD_URL}" -o google-cloud-sdk.tar.gz
-    
-    # パッケージの展開
-    echo "パッケージを展開しています..."
-    mkdir -p /usr/local
-    tar -xzf google-cloud-sdk.tar.gz -C /usr/local
-    
-    # インストール
-    echo "Google Cloud SDKをインストールしています..."
-    /usr/local/google-cloud-sdk/install.sh --quiet --usage-reporting=false --path-update=true --command-completion=true --install-python=true
-    
-    # 追加コンポーネントのインストール（指定されている場合）
-    if [ ! -z "${INSTALL_COMPONENTS}" ]; then
-        echo "追加コンポーネントをインストールしています: ${INSTALL_COMPONENTS}"
-        for component in ${INSTALL_COMPONENTS}; do
-            /usr/local/google-cloud-sdk/bin/gcloud components install ${component} --quiet
-        done
+}
+
+# ------------------------------------------------------------------
+# 実行
+# ------------------------------------------------------------------
+if type apt-get > /dev/null 2>&1; then
+    if ! install_via_apt; then
+        install_via_archive
     fi
-    
-    # システム全体でgcloudコマンドが使えるようにシンボリックリンクを作成
-    ln -sf /usr/local/google-cloud-sdk/bin/gcloud /usr/local/bin/gcloud
-    ln -sf /usr/local/google-cloud-sdk/bin/gsutil /usr/local/bin/gsutil
-    ln -sf /usr/local/google-cloud-sdk/bin/bq /usr/local/bin/bq
-    
-    # 一時ディレクトリの削除
-    cd /
-    rm -rf "${TMP_DIR}"
+else
+    install_via_archive
 fi
 
 # Clean up
 rm -rf /var/lib/apt/lists/*
 
-echo "Google Cloud SDKのインストールが完了しました！"
-echo "gcloudコマンドでGoogle Cloud SDKを使用できます。"
+echo "Google Cloud CLIのインストールが完了しました！"
+gcloud --version

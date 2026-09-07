@@ -12,8 +12,17 @@
         "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
         "features": {
             "google-cloud-sdk": {
-                "version": "410.0.0",
+                "version": "520.0.0",
                 "components": ""
+            }
+        }
+    },
+    "google-cloud-sdk-with-components": {
+        "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+        "features": {
+            "google-cloud-sdk": {
+                "version": "latest",
+                "components": "gke-gcloud-auth-plugin,kubectl"
             }
         }
     }
