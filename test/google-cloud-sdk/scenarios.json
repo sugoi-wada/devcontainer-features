@@ -25,5 +25,14 @@
                 "components": "gke-gcloud-auth-plugin,kubectl"
             }
         }
+    },
+    "google-cloud-sdk-with-apt-version": {
+        "image": "ubuntu:latest",
+        "features": {
+            "google-cloud-sdk": {
+                "version": "560.0.0",
+                "components": ""
+            }
+        }
     }
 }

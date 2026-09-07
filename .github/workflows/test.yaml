@@ -26,14 +26,14 @@ jobs:
       - name: "Generating tests for '${{ matrix.features }}' against '${{ matrix.baseImage }}'"
         run: devcontainer features test --skip-scenarios -f ${{ matrix.features }} -i ${{ matrix.baseImage }} .
 
+  # -f は Feature のディレクトリ名を指すため、シナリオ名を列挙するとシナリオファイルが
+  # 見つからず黙ってスキップされる。test/<feature>/scenarios.json 内の全シナリオが実行される。
   test-scenarios:
     runs-on: ubuntu-latest
     strategy:
       matrix:
         features:
           - google-cloud-sdk
-          - google-cloud-sdk-with-version
-          - google-cloud-sdk-with-components
     steps:
       - uses: actions/checkout@v7
 
