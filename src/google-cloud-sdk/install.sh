@@ -17,6 +17,10 @@ CLOUD_SDK_VERSION="${VERSION:-"latest"}"
 INSTALL_COMPONENTS="${COMPONENTS:-""}"
 
 APT_PACKAGE_NAME="google-cloud-cli"
+APT_SOURCE_LIST="/etc/apt/sources.list.d/google-cloud-sdk.list"
+APT_KEYRING="/usr/share/keyrings/cloud.google.gpg"
+# この実行で鍵を新規作成したかどうか（フォールバック時に削除して良いかの判定に使う）
+APT_KEYRING_CREATED=0
 INSTALL_DIR="/usr/local/google-cloud-sdk"
 USERNAME="${USERNAME:-"${_REMOTE_USER:-"automatic"}"}"
 
@@ -58,6 +62,22 @@ check_packages() {
     fi
 }
 
+# アーカイブ版へフォールバックする際にaptリポジトリ設定を撤去する
+# （アーカイブ版とaptパッケージが二重にインストールされうる状態を残さないため）
+remove_apt_repo() {
+    rm -f "${APT_SOURCE_LIST}"
+    # /usr/share/keyrings/cloud.google.gpg は gcsfuse や artifact-registry など
+    # 他の packages.cloud.google.com リポジトリでも共有される公式のパスなので、
+    # この実行で新規作成した場合のみ削除する。
+    # （既存の鍵を消すと、それを signed-by で参照している他リポジトリの
+    #   apt-get update が "is not signed" で失敗してしまう）
+    if [ "${APT_KEYRING_CREATED}" = "1" ]; then
+        rm -f "${APT_KEYRING}"
+        APT_KEYRING_CREATED=0
+    fi
+    apt-get update -y > /dev/null 2>&1 || true
+}
+
 # aptリポジトリに該当パッケージが存在するか判定する
 apt_package_exists() {
     apt-cache policy "$1" 2> /dev/null | grep -qE "^\s+Candidate: [^(]" 
@@ -83,7 +103,7 @@ detect_archive_arch() {
 
 # 追加コンポーネント指定をカンマ・空白区切りのどちらでも受け付けて正規化する
 normalize_components() {
-    echo "${INSTALL_COMPONENTS}" | tr ',' ' ' | tr -s ' '
+    echo "${INSTALL_COMPONENTS}" | tr ',' ' ' | tr -s ' ' | sed -e 's/^ *//' -e 's/ *$//'
 }
 
 setup_shell_integration() {
@@ -127,33 +147,63 @@ EOF
 install_via_apt() {
     echo "aptリポジトリからGoogle Cloud CLIをインストールします。"
 
-    check_packages ca-certificates curl gnupg apt-transport-https
+    # この関数は if の条件として呼ばれるため set -e が効かない。
+    # 失敗を取りこぼすと「成功したように見えて壊れている」状態になるので、各段階で明示的に判定する。
+    if ! check_packages ca-certificates curl gnupg apt-transport-https; then
+        echo "aptリポジトリの利用に必要なパッケージを導入できませんでした。アーカイブ版にフォールバックします。"
+        return 1
+    fi
 
     # 古いリポジトリ設定があれば削除
-    rm -f /etc/apt/sources.list.d/google-cloud-sdk.list
+    rm -f "${APT_SOURCE_LIST}"
 
-    mkdir -p /usr/share/keyrings
+    mkdir -p "$(dirname "${APT_KEYRING}")"
     echo "Google Cloud CLIの署名鍵をインポートしています..."
-    curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg \
-        | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg
-    chmod 644 /usr/share/keyrings/cloud.google.gpg
+    # 鍵の取得に失敗したまま source list を書くと、以降コンテナ内の apt-get update が
+    # 常に "is not signed" で失敗し、後続のFeatureやユーザーのapt操作まで壊れる。
+    # そのため鍵を取得できたことを確認してから source list を書き込む。
+    local tmp_key
+    tmp_key="$(mktemp)"
+    if ! curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg -o "${tmp_key}"; then
+        echo "署名鍵の取得に失敗しました。アーカイブ版にフォールバックします。"
+        rm -f "${tmp_key}"
+        return 1
+    fi
+    if ! gpg --dearmor < "${tmp_key}" > "${APT_KEYRING}.tmp" || [ ! -s "${APT_KEYRING}.tmp" ]; then
+        echo "署名鍵の変換に失敗しました。アーカイブ版にフォールバックします。"
+        rm -f "${tmp_key}" "${APT_KEYRING}.tmp"
+        return 1
+    fi
+    rm -f "${tmp_key}"
+    if [ ! -e "${APT_KEYRING}" ]; then
+        APT_KEYRING_CREATED=1
+    fi
+    mv "${APT_KEYRING}.tmp" "${APT_KEYRING}"
+    chmod 644 "${APT_KEYRING}"
 
-    echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" \
-        > /etc/apt/sources.list.d/google-cloud-sdk.list
+    echo "deb [signed-by=${APT_KEYRING}] https://packages.cloud.google.com/apt cloud-sdk main" \
+        > "${APT_SOURCE_LIST}"
 
-    apt_get_update
+    if ! apt_get_update; then
+        echo "apt-get updateに失敗しました。アーカイブ版にフォールバックします。"
+        remove_apt_repo
+        return 1
+    fi
 
-    # --- 先にインストール対象をすべて解決する（途中で失敗してアーカイブ版と二重インストールになるのを避ける） ---
+    # --- インストール対象を解決する ---
+    local apt_version=""
     local apt_target="${APT_PACKAGE_NAME}"
     if [ "${CLOUD_SDK_VERSION}" != "latest" ]; then
         # apt上のバージョン表記は <version>-0 形式
-        local apt_version="${CLOUD_SDK_VERSION}"
+        apt_version="${CLOUD_SDK_VERSION}"
         case "${apt_version}" in
             *-*) ;;
             *) apt_version="${apt_version}-0" ;;
         esac
-        if ! apt-cache madison "${APT_PACKAGE_NAME}" | grep -q " ${apt_version} "; then
+        # バージョン文字列にドットを含むため、正規表現ではなく固定文字列で照合する
+        if ! apt-cache madison "${APT_PACKAGE_NAME}" | grep -qF " ${apt_version} "; then
             echo "aptリポジトリにバージョン ${CLOUD_SDK_VERSION} が見つかりませんでした。アーカイブ版にフォールバックします。"
+            remove_apt_repo
             return 1
         fi
         apt_target="${APT_PACKAGE_NAME}=${apt_version}"
@@ -175,13 +225,51 @@ install_via_apt() {
         done
         if [ -z "${resolved}" ]; then
             echo "コンポーネント '${component}' に対応するaptパッケージが見つかりませんでした。アーカイブ版にフォールバックします。"
+            remove_apt_repo
             return 1
+        fi
+        # バージョン指定時はコンポーネント側も同じバージョンに揃える
+        # （google-cloud-cli-* の依存はバージョン非固定のため、揃えないとcoreだけ固定版になる）
+        if [ -n "${apt_version}" ] && [ "${resolved}" != "${component}" ]; then
+            if apt-cache madison "${resolved}" | grep -qF " ${apt_version} "; then
+                resolved="${resolved}=${apt_version}"
+            else
+                echo "コンポーネント '${component}' にバージョン ${CLOUD_SDK_VERSION} のパッケージが見つかりませんでした。バージョン指定なしで解決します。"
+            fi
         fi
         component_packages="${component_packages} ${resolved}"
     done
 
-    # ここまでで対象は解決済み。以降の失敗はフォールバックせずエラーにする
-    # （apt が途中で失敗した状態でアーカイブ版を重ねると壊れたインストールになるため）
+    # 実際に依存関係を解決できるかを事前に検証する。
+    # apt-cache madison はリポジトリ上の存在しか見ておらず、例えば ubuntu:26.04 (python3 3.14) に
+    # 古い google-cloud-cli を固定指定すると Depends: python3 (< 3.14) を満たせず失敗する。
+    # ここで検知してアーカイブ版へ逃がす。
+    echo "aptで依存関係を解決できるか確認しています..."
+    local dry_run_log
+    dry_run_log="$(mktemp)"
+    # メッセージを固定するためロケールをCにする
+    # shellcheck disable=SC2086
+    if ! LC_ALL=C apt-get -y install --no-install-recommends -s "${apt_target}" ${component_packages} \
+        > "${dry_run_log}" 2>&1; then
+        echo "aptで依存関係を解決できませんでした。アーカイブ版にフォールバックします。"
+        tail -n 5 "${dry_run_log}"
+        rm -f "${dry_run_log}"
+        remove_apt_repo
+        return 1
+    fi
+    # 解決はできても既存パッケージの削除やダウングレードを伴う場合がある。
+    # -y で本実行すると環境を壊してしまうため、これもフォールバック対象にする。
+    if grep -qE "^The following packages will be (REMOVED|DOWNGRADED)" "${dry_run_log}"; then
+        echo "aptでのインストールが既存パッケージの削除・ダウングレードを伴うため、アーカイブ版にフォールバックします。"
+        grep -A2 -E "^The following packages will be (REMOVED|DOWNGRADED)" "${dry_run_log}"
+        rm -f "${dry_run_log}"
+        remove_apt_repo
+        return 1
+    fi
+    rm -f "${dry_run_log}"
+
+    # 事前検証を通っているため、ここでの失敗は想定外。
+    # apt が途中で失敗した状態にアーカイブ版を重ねると壊れるのでフォールバックせずエラーにする。
     echo "Google Cloud CLIをインストールしています: ${apt_target}${component_packages}"
     # shellcheck disable=SC2086
     if ! apt-get -y install --no-install-recommends "${apt_target}" ${component_packages}; then

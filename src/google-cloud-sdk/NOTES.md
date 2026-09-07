@@ -4,10 +4,23 @@
 | --- | --- |
 | Debian / Ubuntu で `version: latest` | apt リポジトリ (`google-cloud-cli`) |
 | Debian / Ubuntu でバージョン指定あり、かつ apt リポジトリに存在する | apt リポジトリ (`google-cloud-cli=<version>-0`) |
-| 上記以外（apt 非対応ディストリ、apt に存在しない古いバージョン） | 公式アーカイブ（`/usr/local/google-cloud-sdk` に展開） |
+| 上記以外（apt 非対応ディストリ、apt に存在しない古いバージョン、apt が依存関係を解決できない場合） | 公式アーカイブ（`/usr/local/google-cloud-sdk` に展開） |
 
 apt リポジトリには直近 40〜50 バージョン程度しか残らないため、それより古いバージョンを指定した場合は
 自動的に[バージョン付きアーカイブ](https://cloud.google.com/sdk/docs/downloads-versioned-archives)へフォールバックします。
+
+apt 経路に進む前に `apt-get install -s`（dry-run）で依存関係を解決できるか検証しています。
+例えば `ubuntu:26.04`（python3 3.14）に古いバージョンを固定指定すると
+`Depends: python3 (< 3.14)` を満たせないため、この時点で検知してアーカイブ版へフォールバックします。
+アーカイブ版へフォールバックする際は、追加した apt リポジトリ設定と署名鍵を撤去します
+（アーカイブ版と apt パッケージが二重にインストールされうる状態を残さないため）。
+
+また、apt が依存関係を解決できても既存パッケージの削除・ダウングレードを伴う場合も
+アーカイブ版へフォールバックします。
+
+なお `/usr/share/keyrings/cloud.google.gpg` は gcsfuse など他の
+`packages.cloud.google.com` リポジトリでも共有される公式のパスのため、
+フォールバック時に撤去するのはこの Feature が新規作成した場合のみです。
 
 ## `components` の指定
 

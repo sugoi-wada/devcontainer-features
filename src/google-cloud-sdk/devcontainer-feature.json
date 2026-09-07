@@ -1,7 +1,7 @@
 {
     "name": "Google Cloud CLI",
     "id": "google-cloud-sdk",
-    "version": "1.1.0",
+    "version": "1.1.1",
     "description": "Google Cloud CLI (gcloud / gsutil / bq) をインストールします。Debian・Ubuntu では apt リポジトリ、それ以外の環境や apt に存在しないバージョン指定時は公式アーカイブを使用します。",
     "documentationURL": "https://github.com/sugoi-wada/devcontainer-features/tree/main/src/google-cloud-sdk",
     "options": {
